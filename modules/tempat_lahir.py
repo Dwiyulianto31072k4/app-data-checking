@@ -127,7 +127,7 @@ def load_reference_data(filepath):
     
     return all_locations, ref_set
 
-def validate_tempat_lahir(data, ref_data, ref_set, threshold=85):
+def validate_tempat_lahir(data, ref_data, ref_set, threshold=85, progress_callback=None):
     """
     Validasi tempat lahir dengan exact dan fuzzy matching
     
@@ -136,6 +136,7 @@ def validate_tempat_lahir(data, ref_data, ref_set, threshold=85):
         ref_data: DataFrame referensi yang berisi data lokasi yang valid
         ref_set: Set referensi untuk pencocokan cepat
         threshold: Threshold untuk fuzzy matching (default: 85)
+        progress_callback: Fungsi callback untuk melaporkan progress (opsional)
     
     Returns:
         DataFrame: DataFrame dengan hasil validasi
@@ -155,7 +156,11 @@ def validate_tempat_lahir(data, ref_data, ref_set, threshold=85):
     # 1. Exact matching
     exact_match_map = dict(zip(ref_data['nama_normalized'], zip(ref_data['nama'], ref_data['level'])))
     
-    for idx, row in validated_data.iterrows():
+    # Jumlah total baris untuk progress reporting
+    total_rows = len(validated_data)
+    
+    # Iterasi baris data
+    for i, (idx, row) in enumerate(validated_data.iterrows()):
         temp_lahir = row['tempat_lahir_normalized']
         if pd.isna(temp_lahir) or temp_lahir == '':
             continue
@@ -186,6 +191,14 @@ def validate_tempat_lahir(data, ref_data, ref_set, threshold=85):
                 nama_asli, level = exact_match_map.get(match, (match, 'tidak diketahui'))
                 validated_data.loc[idx, 'koreksi_tempat_lahir'] = nama_asli
                 validated_data.loc[idx, 'level_administrasi'] = level
+        
+        # Update progress setiap 10 baris atau sesuai kebutuhan
+        if progress_callback and i % 10 == 0:
+            progress_callback(min(i / total_rows, 1.0))
+    
+    # Pastikan progress mencapai 100% di akhir
+    if progress_callback:
+        progress_callback(1.0)
     
     return validated_data
 
