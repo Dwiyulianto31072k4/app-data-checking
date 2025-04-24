@@ -1,283 +1,373 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import re
-from rapidfuzz import process, fuzz
-import unicodedata
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import io
+from modules.validators import validate_kk, validate_nik, validate_custname, validate_jenis_kelamin, validate_tanggal_lahir, generate_validation_notes
+from modules.tempat_lahir import validate_tempat_lahir, load_reference_data
 
-def normalize_tempat_lahir(name):
-    """
-    Normalisasi nama tempat lahir
-    
-    Args:
-        name: Nama tempat lahir yang akan dinormalisasi
-    
-    Returns:
-        str: Nama tempat lahir yang sudah dinormalisasi
-    """
-    if pd.isna(name):
-        return name
-    
-    # Konversi ke uppercase
-    name = str(name).upper()
-    
-    # Hapus karakter khusus dan angka
-    name = re.sub(r'[^\w\s]', ' ', name)
-    name = re.sub(r'\d+', '', name)
-    
-    # Hapus spasi berlebih
-    name = re.sub(r'\s+', ' ', name).strip()
-    
-    # Normalisasi prefix umum
-    prefixes = {
-        'DESA ': '',
-        'KELURAHAN ': '',
-        'KEL ': '',
-        'DS ': '',
-        'KEC ': '',
-        'KECAMATAN ': '',
-        'KAB ': '',
-        'KABUPATEN ': '',
-        'KOTA ': '',
-        'PROVINSI ': '',
-        'PROV ': ''
-    }
-    
-    for prefix, replacement in prefixes.items():
-        if name.startswith(prefix):
-            name = replacement + name[len(prefix):]
-    
-    # Penanganan kasus khusus
-    special_cases = {
-        'JKT': 'JAKARTA',
-        'JAKARTA PUSAT': 'JAKARTA',
-        'JAKARTA BARAT': 'JAKARTA',
-        'JAKARTA TIMUR': 'JAKARTA',
-        'JAKARTA SELATAN': 'JAKARTA',
-        'JAKARTA UTARA': 'JAKARTA',
-        'DKI JAKARTA': 'JAKARTA',
-        'JOGJAKARTA': 'YOGYAKARTA',
-        'JOGJA': 'YOGYAKARTA',
-        'YOGYA': 'YOGYAKARTA',
+# Konfigurasi halaman
+st.set_page_config(
+    page_title="Aplikasi Validasi Data KK",
+    page_icon="📋",
+    layout="wide"
+)
 
-        # Tambahan validasi kabupaten/kota
-        'KOTA BARU': 'KOTABARU',
-        'KOTA BAROE': 'KOTABARU',
-        'KOTAWARINGIN': 'KOTAWARINGIN BARAT',
-        'KOTAWARINGIN BRT': 'KOTAWARINGIN BARAT',
-        'KOTAWARINGIN TIMUR': 'KOTAWARINGIN TIMUR',
-        'KOTAWARINGIN TMR': 'KOTAWARINGIN TIMUR',
-        '50 KOTA': 'LIMA PULUH KOTA',
-        'LIMA 50 KOTA': 'LIMA PULUH KOTA',
-        'KOTA KOTAMOBAGU': 'KOTAMOBAGU',
-        'PEKAN BARU': 'PEKANBARU',
-        'LUBUK LINGGAU': 'LUBUKLINGGAU',
-        'KABUPATEN BATU BARA': 'KABUPATEN BATUBARA',
-    }
-    
-    for case, replacement in special_cases.items():
-        if name == case:
-            name = replacement
-    
-    return name
+# Judul aplikasi
+st.title("Aplikasi Validasi Data KK")
+st.markdown("Aplikasi ini membantu Anda memvalidasi data KK, NIK, nama, jenis kelamin, tempat lahir, dan tanggal lahir.")
 
-def load_reference_data(filepath):
-    """
-    Muat data referensi dari file CSV
+# Membaca data referensi untuk validasi tempat lahir
+@st.cache_data
+def load_tempat_lahir_reference():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    ref_file_path = os.path.join(current_dir, "data", "LapakGIS_KelurahanDesa_2024.csv")
     
-    Args:
-        filepath: Path ke file CSV referensi
-    
-    Returns:
-        tuple: (dataframe referensi, set referensi untuk matching cepat)
-    """
-    ref_data = pd.read_csv(filepath)
-    
-    # Buat DataFrames untuk setiap level administrasi
-    # 1. Desa/Kelurahan
-    desa_df = ref_data[['NAMOBJ', 'WADMKD']].dropna().drop_duplicates()
-    desa_df = desa_df.rename(columns={'WADMKD': 'nama', 'NAMOBJ': 'kode'})
-    desa_df['level'] = 'desa'
-    
-    # 2. Kecamatan
-    kec_df = ref_data[['WADMKC']].dropna().drop_duplicates()
-    kec_df = kec_df.rename(columns={'WADMKC': 'nama'})
-    kec_df['kode'] = kec_df['nama']
-    kec_df['level'] = 'kecamatan'
-    
-    # 3. Kabupaten/Kota
-    kab_df = ref_data[['WADMKK']].dropna().drop_duplicates()
-    kab_df = kab_df.rename(columns={'WADMKK': 'nama'})
-    kab_df['kode'] = kab_df['nama']
-    kab_df['level'] = 'kabupaten'
-    
-    # 4. Provinsi
-    prov_df = ref_data[['WADMPR']].dropna().drop_duplicates()
-    prov_df = prov_df.rename(columns={'WADMPR': 'nama'})
-    prov_df['kode'] = prov_df['nama']
-    prov_df['level'] = 'provinsi'
-    
-    # Gabungkan semua level
-    all_locations = pd.concat([desa_df, kec_df, kab_df, prov_df])
-    
-    # Normalisasi nama lokasi
-    all_locations['nama_normalized'] = all_locations['nama'].apply(normalize_tempat_lahir)
-    
-    # Buat set referensi untuk pencocokan cepat
-    ref_set = set(all_locations['nama_normalized'].unique())
-    
-    return all_locations, ref_set
+    try:
+        ref_data, ref_set = load_reference_data(ref_file_path)
+        return ref_data, ref_set
+    except Exception as e:
+        st.error(f"Error loading reference data: {e}")
+        return None, None
 
-def validate_tempat_lahir(data, ref_data, ref_set, threshold=85, progress_callback=None):
-    """
-    Validasi tempat lahir dengan exact dan fuzzy matching
-    
-    Args:
-        data: DataFrame yang berisi data yang akan divalidasi
-        ref_data: DataFrame referensi yang berisi data lokasi yang valid
-        ref_set: Set referensi untuk pencocokan cepat
-        threshold: Threshold untuk fuzzy matching (default: 85)
-        progress_callback: Fungsi callback untuk melaporkan progress (opsional)
-    
-    Returns:
-        DataFrame: DataFrame dengan hasil validasi
-    """
-    # Buat salinan data
-    validated_data = data.copy()
-    
-    # Normalisasi tempat lahir di data
-    validated_data['tempat_lahir_normalized'] = validated_data['TEMPAT_LAHIR'].apply(normalize_tempat_lahir)
-    
-    # Hasil validasi
-    validated_data['valid_tempat_lahir'] = False
-    validated_data['koreksi_tempat_lahir'] = None
-    validated_data['level_administrasi'] = None
-    validated_data['confidence_score'] = 0.0
-    
-    # 1. Exact matching
-    exact_match_map = dict(zip(ref_data['nama_normalized'], zip(ref_data['nama'], ref_data['level'])))
-    
-    # Jumlah total baris untuk progress reporting
-    total_rows = len(validated_data)
-    
-    # Iterasi baris data
-    for i, (idx, row) in enumerate(validated_data.iterrows()):
-        temp_lahir = row['tempat_lahir_normalized']
-        if pd.isna(temp_lahir) or temp_lahir == '':
-            continue
+# Load reference data
+ref_data, ref_set = load_tempat_lahir_reference()
+
+# Upload file
+uploaded_file = st.file_uploader("Upload File Excel Data KK", type=["xlsx", "xls"])
+
+if uploaded_file is not None:
+    # Tampilkan spinner selama memproses data
+    with st.spinner('Memproses data...'):
+        try:
+            # Baca file Excel yang diupload
+            data = pd.read_excel(
+                uploaded_file,
+                dtype={
+                    "NIK": str,
+                    "NIK_GROSS": str,
+                    "KK_NO": str,
+                    "KK_NO_GROSS": str,
+                    "CONTRACT_NO": str
+                }
+            )
             
-        # Exact matching
-        if temp_lahir in ref_set:
-            validated_data.loc[idx, 'valid_tempat_lahir'] = True
-            validated_data.loc[idx, 'confidence_score'] = 100.0
-            nama_asli, level = exact_match_map.get(temp_lahir, (temp_lahir, 'tidak diketahui'))
-            validated_data.loc[idx, 'koreksi_tempat_lahir'] = nama_asli
-            validated_data.loc[idx, 'level_administrasi'] = level
-            continue
-        
-        # Fuzzy matching
-        result = process.extractOne(
-            temp_lahir, 
-            list(ref_set), 
-            scorer=fuzz.token_sort_ratio
-        )
-        
-        if result and len(result) >= 2:
-            match = result[0]
-            score = result[1]
+            # Tampilkan info data yang diupload
+            st.success(f"File berhasil diupload! Total data: {len(data):,} baris")
             
-            if score >= threshold:
-                validated_data.loc[idx, 'valid_tempat_lahir'] = True
-                validated_data.loc[idx, 'confidence_score'] = score
-                nama_asli, level = exact_match_map.get(match, (match, 'tidak diketahui'))
-                validated_data.loc[idx, 'koreksi_tempat_lahir'] = nama_asli
-                validated_data.loc[idx, 'level_administrasi'] = level
+            # Tampilkan sample data
+            st.subheader("Sample Data")
+            st.dataframe(data.head())
+            
+            # Validasi data
+            if st.button("Validasi Data"):
+                # Inisialisasi progress bar utama
+                progress_bar = st.progress(0)
+                
+                # Hitung total langkah validasi
+                total_steps = 7  # 6 validasi + 1 untuk finalisasi
+                current_step = 0
+                
+                with st.spinner('Sedang memvalidasi data...'):
+                    # Validasi KK_NO
+                    st.text("Memvalidasi nomor KK...")
+                    data['valid_kk_no'] = data['KK_NO'].apply(validate_kk)
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Validasi NIK
+                    st.text("Memvalidasi NIK...")
+                    data['valid_nik'] = data['NIK'].apply(validate_nik)
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Validasi CUSTNAME
+                    st.text("Memvalidasi nama...")
+                    data['valid_custname'] = data['CUSTNAME'].apply(validate_custname)
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Validasi JENIS_KELAMIN
+                    st.text("Memvalidasi jenis kelamin...")
+                    data['valid_jenis_kelamin'] = data['JENIS_KELAMIN'].apply(validate_jenis_kelamin)
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Validasi TEMPAT_LAHIR
+                    st.text("Memvalidasi tempat lahir...")
+                    # Progress bar khusus untuk tempat lahir
+                    tempat_lahir_progress = st.progress(0)
+                    
+                    def update_tempat_lahir_progress(progress):
+                        tempat_lahir_progress.progress(progress)
+                    
+                    validated_tempat_lahir = validate_tempat_lahir(data, ref_data, ref_set, threshold=85, progress_callback=update_tempat_lahir_progress)
+                    
+                    data['tempat_lahir_normalized'] = validated_tempat_lahir['tempat_lahir_normalized']
+                    data['valid_tempat_lahir'] = validated_tempat_lahir['valid_tempat_lahir']
+                    data['koreksi_tempat_lahir'] = validated_tempat_lahir['koreksi_tempat_lahir']
+                    data['level_administrasi'] = validated_tempat_lahir['level_administrasi']
+                    data['confidence_score'] = validated_tempat_lahir['confidence_score']
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Validasi TANGGAL_LAHIR
+                    st.text("Memvalidasi tanggal lahir...")
+                    data['valid_tanggal_lahir'] = data['TANGGAL_LAHIR'].apply(validate_tanggal_lahir)
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Flag all valid
+                    st.text("Menyelesaikan validasi...")
+                    data['all_valid'] = (data['valid_kk_no'] & 
+                                       data['valid_nik'] & 
+                                       data['valid_custname'] & 
+                                       data['valid_jenis_kelamin'] & 
+                                       data['valid_tempat_lahir'] & 
+                                       data['valid_tanggal_lahir'])
+                    
+                    # Tambahkan catatan validasi
+                    data['catatan_validasi'] = data.apply(generate_validation_notes, axis=1)
+                    current_step += 1
+                    progress_bar.progress(current_step/total_steps)
+                    
+                    # Tampilkan hasil validasi
+                    st.subheader("Hasil Validasi")
+                    
+                    # Layout 2 kolom untuk statistik dan chart
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Statistik validasi
+                        total_records = len(data)
+                        all_valid_count = data['all_valid'].sum()
+                        any_invalid_count = total_records - all_valid_count
+                        
+                        st.metric("Total Data", f"{total_records:,}")
+                        st.metric("Data Valid", f"{all_valid_count:,} ({all_valid_count/total_records*100:.2f}%)")
+                        st.metric("Data Tidak Valid", f"{any_invalid_count:,} ({any_invalid_count/total_records*100:.2f}%)")
+                    
+                    with col2:
+                        # Chart untuk visualisasi hasil validasi
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        
+                        # Hasil validasi per kategori
+                        validation_results = {
+                            'KK_NO': data['valid_kk_no'].sum(),
+                            'NIK': data['valid_nik'].sum(),
+                            'Nama': data['valid_custname'].sum(),
+                            'Jenis Kelamin': data['valid_jenis_kelamin'].sum(),
+                            'Tempat Lahir': data['valid_tempat_lahir'].sum(),
+                            'Tanggal Lahir': data['valid_tanggal_lahir'].sum()
+                        }
+                        
+                        categories = list(validation_results.keys())
+                        valid_counts = list(validation_results.values())
+                        invalid_counts = [total_records - count for count in valid_counts]
+                        
+                        ax.bar(categories, valid_counts, label='Valid', color='green')
+                        ax.bar(categories, invalid_counts, bottom=valid_counts, label='Tidak Valid', color='red')
+                        
+                        ax.set_ylabel('Jumlah Data')
+                        ax.set_title('Hasil Validasi per Kategori')
+                        ax.legend()
+                        
+                        # Rotasi label untuk lebih mudah dibaca
+                        plt.xticks(rotation=45)
+                        plt.tight_layout()
+                        
+                        st.pyplot(fig)
+                    
+                    # Tabs untuk detail hasil validasi
+                    tab1, tab2, tab3 = st.tabs(["Detail Validasi", "Data Tidak Valid", "Semua Data"])
+                    
+                    with tab1:
+                        st.subheader("Detail Validasi per Kategori")
+                        
+                        # Detail validasi KK
+                        st.markdown("### Validasi KK")
+                        kk_valid = data['valid_kk_no'].sum()
+                        kk_invalid = total_records - kk_valid
+                        st.write(f"KK Valid: {kk_valid:,} ({kk_valid/total_records*100:.2f}%)")
+                        st.write(f"KK Tidak Valid: {kk_invalid:,} ({kk_invalid/total_records*100:.2f}%)")
+                        
+                        if kk_invalid > 0:
+                            st.write("Contoh KK tidak valid:")
+                            st.dataframe(data[~data['valid_kk_no']].head()[['KK_NO']])
+                        
+                        # Detail validasi NIK
+                        st.markdown("### Validasi NIK")
+                        nik_valid = data['valid_nik'].sum()
+                        nik_invalid = total_records - nik_valid
+                        st.write(f"NIK Valid: {nik_valid:,} ({nik_valid/total_records*100:.2f}%)")
+                        st.write(f"NIK Tidak Valid: {nik_invalid:,} ({nik_invalid/total_records*100:.2f}%)")
+                        
+                        if nik_invalid > 0:
+                            st.write("Contoh NIK tidak valid:")
+                            st.dataframe(data[~data['valid_nik']].head()[['NIK']])
+                        
+                        # Detail validasi Nama
+                        st.markdown("### Validasi Nama")
+                        name_valid = data['valid_custname'].sum()
+                        name_invalid = total_records - name_valid
+                        st.write(f"Nama Valid: {name_valid:,} ({name_valid/total_records*100:.2f}%)")
+                        st.write(f"Nama Tidak Valid: {name_invalid:,} ({name_invalid/total_records*100:.2f}%)")
+                        
+                        if name_invalid > 0:
+                            st.write("Contoh Nama tidak valid:")
+                            st.dataframe(data[~data['valid_custname']].head()[['CUSTNAME']])
+                        
+                        # Detail validasi Jenis Kelamin
+                        st.markdown("### Validasi Jenis Kelamin")
+                        jk_valid = data['valid_jenis_kelamin'].sum()
+                        jk_invalid = total_records - jk_valid
+                        st.write(f"Jenis Kelamin Valid: {jk_valid:,} ({jk_valid/total_records*100:.2f}%)")
+                        st.write(f"Jenis Kelamin Tidak Valid: {jk_invalid:,} ({jk_invalid/total_records*100:.2f}%)")
+                        
+                        if jk_invalid > 0:
+                            st.write("Contoh Jenis Kelamin tidak valid:")
+                            st.dataframe(data[~data['valid_jenis_kelamin']].head()[['JENIS_KELAMIN']])
+                        
+                        # Detail validasi Tempat Lahir (lebih detail karena lebih kompleks)
+                        st.markdown("### Validasi Tempat Lahir")
+                        tempat_lahir_valid = data['valid_tempat_lahir'].sum()
+                        tempat_lahir_invalid = total_records - tempat_lahir_valid
+                        st.write(f"Tempat Lahir Valid: {tempat_lahir_valid:,} ({tempat_lahir_valid/total_records*100:.2f}%)")
+                        st.write(f"Tempat Lahir Tidak Valid: {tempat_lahir_invalid:,} ({tempat_lahir_invalid/total_records*100:.2f}%)")
+                        
+                        # Distribusi level administrasi
+                        if 'level_administrasi' in data.columns:
+                            level_dist = data[data['valid_tempat_lahir']]['level_administrasi'].value_counts()
+                            st.write("Distribusi Level Administrasi:")
+                            
+                            level_data = pd.DataFrame({
+                                'Level': level_dist.index,
+                                'Jumlah': level_dist.values,
+                                'Persentase': [f"{count/tempat_lahir_valid*100:.2f}%" for count in level_dist.values]
+                            })
+                            
+                            st.dataframe(level_data)
+                        
+                        # Detail validasi Tanggal Lahir
+                        st.markdown("### Validasi Tanggal Lahir")
+                        tl_valid = data['valid_tanggal_lahir'].sum()
+                        tl_invalid = total_records - tl_valid
+                        st.write(f"Tanggal Lahir Valid: {tl_valid:,} ({tl_valid/total_records*100:.2f}%)")
+                        st.write(f"Tanggal Lahir Tidak Valid: {tl_invalid:,} ({tl_invalid/total_records*100:.2f}%)")
+                        
+                        if tl_invalid > 0:
+                            st.write("Contoh Tanggal Lahir tidak valid:")
+                            st.dataframe(data[~data['valid_tanggal_lahir']].head()[['TANGGAL_LAHIR']])
+                        
+                    with tab2:
+                        st.subheader("Data Tidak Valid")
+                        invalid_data = data[~data['all_valid']]
+                        
+                        if len(invalid_data) > 0:
+                            st.write(f"Total data tidak valid: {len(invalid_data):,}")
+                            
+                            # Filter untuk menampilkan berdasarkan jenis validasi
+                            validation_types = st.multiselect(
+                                "Filter berdasarkan validasi yang gagal:",
+                                ["KK_NO", "NIK", "Nama", "Jenis Kelamin", "Tempat Lahir", "Tanggal Lahir"],
+                                placeholder="Pilih jenis validasi"
+                            )
+                            
+                            filtered_data = invalid_data.copy()
+                            
+                            if validation_types:
+                                mask = pd.Series(False, index=filtered_data.index)
+                                
+                                if "KK_NO" in validation_types:
+                                    mask = mask | ~filtered_data['valid_kk_no']
+                                if "NIK" in validation_types:
+                                    mask = mask | ~filtered_data['valid_nik']
+                                if "Nama" in validation_types:
+                                    mask = mask | ~filtered_data['valid_custname']
+                                if "Jenis Kelamin" in validation_types:
+                                    mask = mask | ~filtered_data['valid_jenis_kelamin']
+                                if "Tempat Lahir" in validation_types:
+                                    mask = mask | ~filtered_data['valid_tempat_lahir']
+                                if "Tanggal Lahir" in validation_types:
+                                    mask = mask | ~filtered_data['valid_tanggal_lahir']
+                                
+                                filtered_data = filtered_data[mask]
+                            
+                            # Tampilkan data tidak valid dengan catatan validasi
+                            st.dataframe(filtered_data[[
+                                'KK_NO', 'NIK', 'CUSTNAME', 'JENIS_KELAMIN', 'TEMPAT_LAHIR', 'TANGGAL_LAHIR',
+                                'valid_kk_no', 'valid_nik', 'valid_custname', 'valid_jenis_kelamin',
+                                'valid_tempat_lahir', 'valid_tanggal_lahir', 'catatan_validasi'
+                            ]])
+                            
+                            # Tambahkan informasi tentang koreksi tempat lahir jika tersedia
+                            if 'koreksi_tempat_lahir' in filtered_data.columns:
+                                tempat_lahir_issues = filtered_data[~filtered_data['valid_tempat_lahir']]
+                                
+                                if not tempat_lahir_issues.empty:
+                                    st.subheader("Koreksi Tempat Lahir Yang Disarankan")
+                                    st.write("Berikut adalah saran koreksi untuk tempat lahir yang tidak valid:")
+                                    
+                                    koreksi_df = tempat_lahir_issues[['TEMPAT_LAHIR', 'tempat_lahir_normalized', 'koreksi_tempat_lahir', 'confidence_score']]
+                                    koreksi_df = koreksi_df.rename(columns={
+                                        'TEMPAT_LAHIR': 'Tempat Lahir Asli',
+                                        'tempat_lahir_normalized': 'Tempat Lahir Normalisasi',
+                                        'koreksi_tempat_lahir': 'Koreksi Yang Disarankan',
+                                        'confidence_score': 'Skor Kepercayaan (%)'
+                                    })
+                                    
+                                    # Filter hanya yang memiliki saran koreksi
+                                    koreksi_df = koreksi_df[~koreksi_df['Koreksi Yang Disarankan'].isna()]
+                                    
+                                    if not koreksi_df.empty:
+                                        st.dataframe(koreksi_df)
+                                    else:
+                                        st.info("Tidak ada saran koreksi untuk tempat lahir yang tidak valid.")
+                            
+                            # Download data tidak valid
+                            csv_buffer = io.BytesIO()
+                            filtered_data.to_excel(csv_buffer, index=False)
+                            csv_buffer.seek(0)
+                            
+                            st.download_button(
+                                label="Download Data Tidak Valid (Excel)",
+                                data=csv_buffer,
+                                file_name='data_tidak_valid.xlsx',
+                                mime='application/vnd.ms-excel'
+                            )
+                        else:
+                            st.success("Semua data valid! Tidak ada data yang gagal validasi.")
+                    
+                    with tab3:
+                        st.subheader("Semua Data Dengan Hasil Validasi")
+                        
+                        # Opsi untuk menampilkan kolom tertentu saja
+                        columns_to_display = st.multiselect(
+                            "Pilih kolom yang ingin ditampilkan:",
+                            data.columns.tolist(),
+                            default=['KK_NO', 'NIK', 'CUSTNAME', 'JENIS_KELAMIN', 'TEMPAT_LAHIR', 'TANGGAL_LAHIR', 'all_valid', 'catatan_validasi']
+                        )
+                        
+                        if columns_to_display:
+                            st.dataframe(data[columns_to_display])
+                        else:
+                            st.dataframe(data)
+                        
+                        # Download semua data dengan hasil validasi
+                        excel_buffer = io.BytesIO()
+                        data.to_excel(excel_buffer, index=False)
+                        excel_buffer.seek(0)
+                        
+                        st.download_button(
+                            label="Download Semua Data Dengan Hasil Validasi (Excel)",
+                            data=excel_buffer,
+                            file_name='hasil_validasi_lengkap.xlsx',
+                            mime='application/vnd.ms-excel'
+                        )
         
-        # Update progress setiap 10 baris atau sesuai kebutuhan
-        if progress_callback and i % 10 == 0:
-            progress_callback(min(i / total_rows, 1.0))
-    
-    # Pastikan progress mencapai 100% di akhir
-    if progress_callback:
-        progress_callback(1.0)
-    
-    return validated_data
-
-def generate_validation_report(data):
-    """
-    Buat laporan hasil validasi tempat lahir
-    
-    Args:
-        data: DataFrame dengan hasil validasi
-    
-    Returns:
-        dict: Laporan validasi dalam bentuk dictionary
-    """
-    total_records = len(data)
-    valid_records = data['valid_tempat_lahir'].sum()
-    valid_percentage = valid_records / total_records * 100
-    
-    # Distribusi berdasarkan level administrasi
-    level_dist = data[data['valid_tempat_lahir']]['level_administrasi'].value_counts()
-    level_distribution = {}
-    for level, count in level_dist.items():
-        level_distribution[level] = {
-            'count': int(count),
-            'percentage': float(count/valid_records*100)
-        }
-    
-    # Distribusi confidence score
-    bins = [0, 70, 80, 90, 95, 100]
-    labels = ['0-70', '70-80', '80-90', '90-95', '95-100']
-    data['confidence_bin'] = pd.cut(data['confidence_score'], bins=bins, labels=labels)
-    
-    confidence_dist = data['confidence_bin'].value_counts().sort_index()
-    confidence_distribution = {}
-    for bin_label, count in confidence_dist.items():
-        if not pd.isna(bin_label):  # Skip NaN values
-            confidence_distribution[str(bin_label)] = {
-                'count': int(count),
-                'percentage': float(count/total_records*100)
-            }
-    
-    # Top koreksi yang dilakukan
-    corrections = data[data['tempat_lahir_normalized'] != data['koreksi_tempat_lahir']]
-    corrections = corrections[~corrections['koreksi_tempat_lahir'].isna()]
-    
-    top_corrections = corrections.groupby(['tempat_lahir_normalized', 'koreksi_tempat_lahir', 'level_administrasi']).size().reset_index(name='count')
-    top_corrections = top_corrections.sort_values('count', ascending=False).head(20)
-    
-    top_corrections_list = []
-    for _, row in top_corrections.iterrows():
-        top_corrections_list.append({
-            'original': row['tempat_lahir_normalized'],
-            'correction': row['koreksi_tempat_lahir'],
-            'level': row['level_administrasi'],
-            'count': int(row['count'])
-        })
-    
-    # Tempat lahir yang tidak valid
-    invalid = data[~data['valid_tempat_lahir']]
-    invalid_sample = invalid.sample(min(20, len(invalid)))
-    
-    invalid_samples_list = []
-    for _, row in invalid_sample.iterrows():
-        invalid_samples_list.append({
-            'tempat_lahir': row['TEMPAT_LAHIR'],
-            'normalized': row['tempat_lahir_normalized'],
-            'confidence_score': float(row['confidence_score']) if not pd.isna(row['confidence_score']) else 0.0
-        })
-    
-    # Kompilasi laporan
-    report = {
-        'total_records': total_records,
-        'valid_records': int(valid_records),
-        'valid_percentage': float(valid_percentage),
-        'invalid_records': int(total_records - valid_records),
-        'invalid_percentage': float(100 - valid_percentage),
-        'level_distribution': level_distribution,
-        'confidence_distribution': confidence_distribution,
-        'top_corrections': top_corrections_list,
-        'invalid_samples': invalid_samples_list
-    }
-    
-    return report
+        except Exception as e:
+            st.error(f"Error saat memproses file: {e}")
+else:
+    st.info("Silakan upload file Excel (.xlsx atau .xls) yang berisi data KK untuk divalidasi.")
